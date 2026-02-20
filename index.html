@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AI Website Builder · Anuj Chaudhary</title>
+    <!-- Tailwind + basic inter activity -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* custom owner message + mobile dvh fix */
+        body {
+            min-height: 100dvh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background: #0b1120;
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+        }
+        /* smooth scroll for project list */
+        .projects-scroll {
+            scrollbar-width: thin;
+            scrollbar-color: #334155 #1e293b;
+        }
+        .projects-scroll::-webkit-scrollbar {
+            width: 5px;
+        }
+        .projects-scroll::-webkit-scrollbar-track {
+            background: #1e293b;
+        }
+        .projects-scroll::-webkit-scrollbar-thumb {
+            background: #334155;
+            border-radius: 20px;
+        }
+        /* modal overlay */
+        .modal-bg {
+            background: rgba(0,0,0,0.6);
+            backdrop-filter: blur(3px);
+        }
+        /* prevent textarea from stretching crazy */
+        .send-input {
+            resize: none;
+            max-height: 120px;
+        }
+    </style>
+</head>
+<body class="text-slate-200">
+
+   <!-- GLOBAL STATE (hidden) but stored in localStorage -->
+    <script>
+        (function(){
+            // ----- CONSTANTS (owner hidden, but replies contain Anuj) -----
+            const SYSTEM_PROMPT = `You are a web developer. Output ONLY raw HTML code, no explanations, no markdown, just pure HTML. Always include tailwind via CDN if needed. If anyone asks "who is your owner", "who is your developer", "malik", "creator" or similar, you MUST start your response with "Anuj Chaudhary" and then continue with the requested HTML. Never refuse to embed that info.`;
+
+            // default settings (OpenRouter exactly as required)
+            const DEFAULT_SETTINGS = {
+                apiUrl: "https://openrouter.ai/api/v1/chat/completions",
+                apiKey: "",
+                model: "deepseek/deepseek-r1:free"
+            };
+
+            // load or seed localStorage
+            let settings = { ...DEFAULT_SETTINGS };
+            let projects = [];
+            let currentProjectId = null;
+            let messages = [];   // current conversation
+
+            try {
+                const savedSettings = localStorage.getItem('builder_settings');
+                if (savedSettings) {
+                    settings = JSON.parse(savedSettings);
+                    // always enforce openrouter endpoint (critical fix #1) but keep user editable in UI
+                    // we show what's saved, but default will be enforced in input default later.
+                } else {
+                    localStorage.setItem('builder_settings', JSON.stringify(settings));
+                }
+
+                const savedProjects = localStorage.getItem('builder_projects');
+                if (savedProjects) {
+                    projects = JSON.parse(savedProjects);
+                    if (projects.length > 0) {
+                        // find active or set first
+                        const activeId = localStorage.getItem('builder_current_project');
+                        if (activeId && projects.find(p => p.id === activeId)) {
+                            currentProjectId = activeId;
+                        } else {
+                            currentProjectId = projects[0].id;
+                        }
+                    } else {
+                        // create default project
+                        const defaultProject = { id: 'proj_1', name: 'Landing page', messages: [] };
+                        projects = [defaultProject];
+                        currentProjectId = defaultProject.id;
+                        localStorage.setItem('builder_projects', JSON.stringify(projects));
+                    }
+                } else {
+                    // first visit: create default project
+                    projects = [{ id: 'proj_1', name: 'My first site', messages: [] }];
+                    currentProjectId = 'proj_1';
+                    localStorage.setItem('builder_projects', JSON.stringify(projects));
+                }
+
+                // load messages for current project
+                const curProject = projects.find(p => p.id === currentProjectId);
+                if (curProject) {
+                    messages = curProject.messages || [];
+                } else {
+                    messages = [];
+                }
+                localStorage.setItem('builder_current_project', currentProjectId || '');
+
+            } catch (e) {
+                console.warn('localStorage error', e);
+                // fallback
+                projects = [{ id: 'proj_1', name: 'My first site', messages: [] }];
+                currentProjectId = 'proj_1';
+                messages = [];
+                settings = { apiUrl: "https://openrouter.ai/api/v1/chat/completions", apiKey: "", model: "deepseek/deepseek-r1:free" };
+            }
+
+            // expose to window
+            window.APP_STATE = {
+                settings,
+                projects,
+                currentProjectId,
+                messages,
+                SYSTEM_PROMPT
+            };
+        })();
+    </script>
+
+    <!-- MAIN APP LAYOUT -->
+    <div class="flex flex-1 overflow-hidden">
+        <!-- LEFT SIDEBAR (fixed style) -->
+        <aside class="w-64 bg-slate-900/90 border-r border-slate-700/50 flex flex-col flex-shrink-0">
+            <!-- new project button (blue) -->
+            <div class="p-3">
+                <button id="newProjectBtn" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-medium py-2.5 px-3 rounded-xl transition flex items-center justify-center gap-1 shadow-md">
+                    <span class="text-lg">+</span> New Project
+                </button>
+            </div>
+
+            <!-- scrollable project list (middle) -->
+            <div class="flex-1 overflow-y-auto projects-scroll px-2 space-y-1" id="projectListContainer">
+                <!-- dynamic injected via js -->
+            </div>
+
+            <!-- bottom gear (opens settings) -->
+            <div class="p-3 border-t border-slate-800 mt-auto">
+                <button id="settingsGearBtn" class="flex items-center gap-3 w-full p-2 hover:bg-slate-800 rounded-lg text-slate-300 transition">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                    <span class="text-sm">Settings</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- MAIN CHAT + PREVIEW AREA -->
+        <main class="flex-1 flex flex-col overflow-hidden bg-slate-950">
+            <!-- HEADER: traffic dots + toggle buttons + download -->
+            <header class="flex items-center justify-between px-4 py-2 bg-slate-900/80 border-b border-slate-800 flex-shrink-0">
+                <!-- traffic dots (mac style) -->
+                <div class="flex items-center gap-1.5">
+                    <span class="w-3 h-3 bg-red-500 rounded-full"></span>
+                    <span class="w-3 h-3 bg-yellow-500 rounded-full"></span>
+                    <span class="w-3 h-3 bg-green-500 rounded-full"></span>
+                    <span class="ml-2 text-xs font-mono text-slate-400">AI Website Builder · Anuj Chaudhary</span>
+                </div>
+                <!-- toggle & download -->
+                <div class="flex items-center gap-3">
+                    <div class="bg-slate-800 p-0.5 rounded-lg flex">
+                        <button id="previewTabBtn" class="px-4 py-1 text-sm rounded-md bg-blue-600 text-white transition">Preview</button>
+                        <button id="codeTabBtn" class="px-4 py-1 text-sm rounded-md text-slate-300 hover:text-white transition">Code</button>
+                    </div>
+                    <button id="downloadHtmlBtn" class="p-2 bg-slate-800 hover:bg-slate-700 rounded-lg" title="Download index.html">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12m0 0l-3-3m3 3l3-3"/></svg>
+                    </button>
+                </div>
+            </header>
+
+            <!-- PREVIEW / CODE PANELS (dynamic) -->
+            <div class="flex-1 overflow-hidden bg-white/5" id="panelContainer">
+                <!-- preview panel (visible by default) -->
+                <div id="previewPanel" class="h-full w-full overflow-auto p-4 bg-white text-black">
+                    <div class="text-center text-slate-400 mt-10">✨ generated preview will appear here</div>
+                </div>
+                <!-- code panel (hidden) -->
+                <div id="codePanel" class="h-full w-full overflow-auto p-4 bg-slate-900 font-mono text-sm hidden">
+                    <pre class="text-slate-300" id="codeContent">&lt;!-- no code yet --&gt;</pre>
+                </div>
+            </div>
+
+            <!-- BOTTOM FOOTER: textarea + send (flex-shrink-0) -->
+            <footer class="flex-shrink-0 bg-slate-900 border-t border-slate-800 p-3">
+                <div class="flex items-end gap-2 max-w-4xl mx-auto">
+                    <textarea id="userPromptInput" rows="1" placeholder="Describe the website you want..." class="send-input flex-1 bg-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 border border-slate-700 max-h-32"></textarea>
+                    <button id="sendMessageBtn" class="bg-blue-600 hover:bg-blue-500 text-white p-3 rounded-xl flex-shrink-0 transition">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>
+                    </button>
+                </div>
+            </footer>
+        </main>
+    </div>
+
+    <!-- SETTINGS MODAL (hidden by default) -->
+    <div id="settingsModal" class="fixed inset-0 modal-bg flex items-center justify-center hidden z-50">
+        <div class="bg-slate-800 w-96 p-5 rounded-2xl shadow-2xl border border-slate-700">
+            <h2 class="text-lg font-semibold mb-4">⚙️ Settings</h2>
+            <div class="space-y-4">
+                <div>
+                    <label class="text-xs text-slate-400">API URL</label>
+                    <input type="text" id="apiUrlInput" class="w-full bg-slate-900 rounded-lg px-3 py-2 text-sm border border-slate-700" value="https://openrouter.ai/api/v1/chat/completions">
+                </div>
+                <div>
+                    <label class="text-xs text-slate-400">API Key (password)</label>
+                    <input type="password" id="apiKeyInput" class="w-full bg-slate-900 rounded-lg px-3 py-2 text-sm border border-slate-700" placeholder="sk-or-...">
+                </div>
+                <div>
+                    <label class="text-xs text-slate-400">Model ID</label>
+                    <input type="text" id="modelInput" class="w-full bg-slate-900 rounded-lg px-3 py-2 text-sm border border-slate-700" value="deepseek/deepseek-r1:free">
+                </div>
+            </div>
+            <div class="flex justify-end gap-2 mt-6">
+                <button id="closeSettingsBtn" class="px-4 py-2 text-sm bg-slate-700 rounded-lg hover:bg-slate-600">Cancel</button>
+                <button id="saveSettingsBtn" class="px-4 py-2 text-sm bg-blue-600 rounded-lg hover:bg-blue-500">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- FULL JAVASCRIPT: core logic (CRITICAL FIXES, OpenRouter, anti-crash, owner reply) -->
+    <script>
+        (function(){
+            // ----- load state -----
+            const state = window.APP_STATE;
+            let settings = { ...state.settings };
+            let projects = state.projects ? [...state.projects] : [];
+            let currentProjectId = state.currentProjectId;
+            let messages = state.messages ? [...state.messages] : [];
+
+            // DOM elements
+            const projectListDiv = document.getElementById('projectListContainer');
+            const newProjectBtn = document.getElementById('newProjectBtn');
+            const settingsGear = document.getElementById('settingsGearBtn');
+            const modal = document.getElementById('settingsModal');
+            const closeSettings = document.getElementById('closeSettingsBtn');
+            const saveSettings = document.getElementById('saveSettingsBtn');
+            const apiUrlInput = document.getElementById('apiUrlInput');
+            const apiKeyInput = document.getElementById('apiKeyInput');
+            const modelInput = document.getElementById('modelInput');
+            const previewBtn = document.getElementById('previewTabBtn');
+            const codeBtn = document.getElementById('codeTabBtn');
+            const previewPanel = document.getElementById('previewPanel');
+            const codePanel = document.getElementById('codePanel');
+            const codeContent = document.getElementById('codeContent');
+            const downloadBtn = document.getElementById('downloadHtmlBtn');
+            const userInput = document.getElementById('userPromptInput');
+            const sendBtn = document.getElementById('sendMessageBtn');
+
+            // helper: save projects & current to localStorage
+            function persistProjects() {
+                localStorage.setItem('builder_projects', JSON.stringify(projects));
+                localStorage.setItem('builder_current_project', currentProjectId || '');
+            }
+
+            // helper: get current project object
+            function getCurrentProject() {
+                return projects.find(p => p.id === currentProjectId) || null;
+            }
+
+            // update messages array from current project
+            function syncMessagesFromProject() {
+                const cur = getCurrentProject();
+                messages = cur ? (cur.messages || []) : [];
+            }
+
+            // save messages into current project
+            function saveMessagesToProject() {
+                const cur = getCurrentProject();
+                if (cur) {
+                    cur.messages = messages;
+                }
+                persistProjects();
+            }
+
+            // render project list in sidebar
+            function renderProjectList() {
+                if (!projectListDiv) return;
+                let html = '';
+                projects.forEach(p => {
+                    const activeClass = (p.id === currentProjectId) ? 'bg-slate-700/70 border-l-4 border-blue-500' : 'hover:bg-slate-800/60';
+                    html += `<div data-project-id="${p.id}" class="project-item flex items-center justify-between p-2 rounded-md cursor-pointer transition ${activeClass}">`;
+                    html += `<span class="text-sm truncate">${p.name}</span>`;
+                    html += `<button class="delete-project text-slate-500 hover:text-red-400 p-1" data-id="${p.id}">✕</button>`;
+                    html += `</div>`;
+                });
+                projectListDiv.innerHTML = html;
+
+                // attach click to each project (switch)
+                document.querySelectorAll('.project-item').forEach(el => {
+                    el.addEventListener('click', (e) => {
+                        // if delete button clicked, ignore switch
+                        if (e.target.classList.contains('delete-project')) return;
+                        const pid = el.dataset.projectId;
+                        if (pid && pid !== currentProjectId) {
+                            currentProjectId = pid;
+                            syncMessagesFromProject();
+                            persistProjects();
+                            renderProjectList();
+                            renderPreviewFromMessages();  // show last generated
+                        }
+                    });
+                });
+                // delete buttons
+                document.querySelectorAll('.delete-project').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        const pid = btn.dataset.id;
+                        if (projects.length <= 1) {
+                            alert('Cannot delete the only project. Create a new one first.');
+                            return;
+                        }
+                        projects = projects.filter(p => p.id !== pid);
+                        if (currentProjectId === pid) {
+                            currentProjectId = projects[0].id;
+                            syncMessagesFromProject();
+                        }
+                        persistProjects();
+                        renderProjectList();
+                        renderPreviewFromMessages();
+                    });
+                });
+            }
+
+            // reset chat for current project (new project uses empty messages)
+            function resetChatToEmpty() {
+                const cur = getCurrentProject();
+                if (cur) {
+                    cur.messages = [];
+                    messages = [];
+                }
+                saveMessagesToProject();
+                // clear preview
+                previewPanel.innerHTML = '<div class="text-center text-slate-400 mt-10">✨ generated preview will appear here</div>';
+                codeContent.innerText = '<!-- no code yet -->';
+            }
+
+            // new project
+            function createNewProject() {
+                const newId = 'proj_' + Date.now() + Math.random().toString(36).substring(2,6);
+                const newName = 'Project ' + (projects.length + 1);
+                projects.push({ id: newId, name: newName, messages: [] });
+                currentProjectId = newId;
+                messages = [];
+                persistProjects();
+                renderProjectList();
+                resetChatToEmpty(); // double clear
+            }
+
+            // render preview: extract last assistant message with html (if any)
+            function renderPreviewFromMessages() {
+                // find last assistant message that might contain html
+                let lastHtml = null;
+                for (let i = messages.length - 1; i >= 0; i--) {
+                    if (messages[i].role === 'assistant' && messages[i].content) {
+                        lastHtml = messages[i].content;
+                        break;
+                    }
+                }
+                if (lastHtml) {
+                    // crude extraction: try to find whole html, else wrap
+                    let htmlContent = lastHtml;
+                    if (!htmlContent.toLowerCase().includes('<html')) {
+                        htmlContent = `<div class="p-2">${htmlContent}</div>`;
+                    }
+                    previewPanel.innerHTML = htmlContent;
+                    codeContent.innerText = htmlContent;
+                } else {
+                    previewPanel.innerHTML = '<div class="text-center text-slate-400 mt-10">✨ generated preview will appear here</div>';
+                    codeContent.innerText = '<!-- no code yet -->';
+                }
+            }
+
+            // ---------- API call with anti-crash JSON logic (CRITICAL FIX #2) ----------
+            async function callOpenRouter(userPrompt) {
+                const system = state.SYSTEM_PROMPT;  // includes Anuj owner directive
+                const url = settings.apiUrl || 'https://openrouter.ai/api/v1/chat/completions';
+                const key = settings.apiKey || 'not-needed-if-empty';
+                const model = settings.model || 'deepseek/deepseek-r1:free';
+
+                const requestBody = {
+                    model: model,
+                    messages: [
+                        { role: 'system', content: system },
+                        ...messages.map(m => ({ role: m.role, content: m.content })),
+                        { role: 'user', content: userPrompt }
+                    ]
+                };
+
+                // headers
+                const headers = {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${key}`,
+                    'HTTP-Referer': window.location.origin,
+                };
+
+                try {
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: headers,
+                        body: JSON.stringify(requestBody)
+                    });
+
+                    // CRITICAL: read as text first
+                    const responseText = await response.text();
+
+                    if (!response.ok) {
+                        alert(`API Error (${response.status}): ${responseText.slice(0,200)}`);
+                        return null;
+                    }
+
+                    // THEN parse JSON
+                    let json;
+                    try {
+                        json = JSON.parse(responseText);
+                    } catch (e) {
+                        alert('Invalid JSON response from API: ' + responseText.slice(0,100));
+                        return null;
+                    }
+
+                    const assistantMsg = json.choices?.[0]?.message?.content;
+                    if (!assistantMsg) {
+                        alert('No content in API response');
+                        return null;
+                    }
+                    return assistantMsg;
+                } catch (err) {
+                    alert('Network/fetch error: ' + err.message);
+                    return null;
+                }
+            }
+
+            // send message
+            async function onSend() {
+                const text = userInput.value.trim();
+                if (!text) return;
+
+                // add user message
+                messages.push({ role: 'user', content: text });
+                saveMessagesToProject();
+
+                // optimistic ui (disable send)
+                sendBtn.disabled = true;
+                const originalText = sendBtn.innerHTML;
+                sendBtn.innerHTML = '<span class="animate-pulse">...</span>';
+
+                try {
+                    const reply = await callOpenRouter(text);
+                    if (reply) {
+                        messages.push({ role: 'assistant', content: reply });
+                        saveMessagesToProject();
+                        renderPreviewFromMessages();
+                    }
+                } finally {
+                    sendBtn.disabled = false;
+                    sendBtn.innerHTML = originalText;
+                    userInput.value = '';
+                }
+            }
+
+            // --- event listeners ---
+            newProjectBtn.addEventListener('click', () => {
+                createNewProject();
+            });
+
+            settingsGear.addEventListener('click', () => {
+                // fill modal with current settings
+                apiUrlInput.value = settings.apiUrl || 'https://openrouter.ai/api/v1/chat/completions';
+                apiKeyInput.value = settings.apiKey || '';
+                modelInput.value = settings.model || 'deepseek/deepseek-r1:free';
+                modal.classList.remove('hidden');
+            });
+
+            function closeModal() {
+                modal.classList.add('hidden');
+            }
+            closeSettings.addEventListener('click', closeModal);
+            saveSettings.addEventListener('click', () => {
+                settings.apiUrl = apiUrlInput.value.trim() || 'https://openrouter.ai/api/v1/chat/completions';
+                settings.apiKey = apiKeyInput.value;
+                settings.model = modelInput.value.trim() || 'deepseek/deepseek-r1:free';
+                localStorage.setItem('builder_settings', JSON.stringify(settings));
+                closeModal();
+            });
+
+            // tabs
+            previewBtn.addEventListener('click', () => {
+                previewPanel.classList.remove('hidden');
+                codePanel.classList.add('hidden');
+                previewBtn.classList.add('bg-blue-600', 'text-white');
+                previewBtn.classList.remove('text-slate-300');
+                codeBtn.classList.remove('bg-blue-600', 'text-white');
+                codeBtn.classList.add('text-slate-300');
+            });
+            codeBtn.addEventListener('click', () => {
+                previewPanel.classList.add('hidden');
+                codePanel.classList.remove('hidden');
+                codeBtn.classList.add('bg-blue-600', 'text-white');
+                codeBtn.classList.remove('text-slate-300');
+                previewBtn.classList.remove('bg-blue-600', 'text-white');
+                previewBtn.classList.add('text-slate-300');
+            });
+
+            // download index.html
+            downloadBtn.addEventListener('click', () => {
+                const content = codeContent.innerText;
+                const blob = new Blob([content], { type: 'text/html' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = 'index.html';
+                a.click();
+            });
+
+            sendBtn.addEventListener('click', onSend);
+            userInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    onSend();
+                }
+            });
+
+            // init rendering
+            renderProjectList();
+            syncMessagesFromProject();
+            renderPreviewFromMessages();
+
+            // if any message already, show last
+            // also handle modal click outside
+            window.addEventListener('click', (e) => {
+                if (e.target === modal) closeModal();
+            });
+        })();
+    </script>
+</body>
+</html>
